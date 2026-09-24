@@ -1,8 +1,65 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import xgboost as xgb
 import joblib
 
 st.set_page_config(page_title="Customer Churn ROI", page_icon="📉", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    /* Page spacing */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        max-width: 1200px;
+    }
+
+    /* Title */
+    h1 {
+        font-weight: 800;
+        letter-spacing: -0.5px;
+    }
+
+    /* Metric cards */
+    [data-testid="stMetric"] {
+        background: #1A1F2B;
+        border: 1px solid #2A3142;
+        border-radius: 12px;
+        padding: 14px 16px;
+    }
+    [data-testid="stMetricLabel"] { opacity: 0.75; }
+    [data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; }
+
+    /* Bordered containers (prediction / ROI cards) */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 14px;
+    }
+
+    /* Tabs */
+    button[data-baseweb="tab"] {
+        font-size: 1rem;
+        padding: 10px 18px;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        border-right: 1px solid #2A3142;
+    }
+
+    /* Buttons */
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 10px;
+        font-weight: 600;
+    }
+
+    /* Hide the footer (keep the header so the sidebar toggle still works) */
+    footer { visibility: hidden; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 REQUIRED_COLUMNS = [
     "gender", "SeniorCitizen", "Partner", "Dependents", "tenure", "PhoneService",
@@ -88,6 +145,12 @@ def clean_batch(df):
     return df
 
 
+def original_column(name):
+    name = name.split("__", 1)[1] if "__" in name else name
+    matches = [c for c in REQUIRED_COLUMNS if name == c or name.startswith(c + "_")]
+    return max(matches, key=len) if matches else name
+
+
 @st.cache_data
 def get_feature_importance():
     """Global importance from the XGBoost step, grouped back to original columns."""
@@ -99,19 +162,14 @@ def get_feature_importance():
     if len(names) != len(values):
         return None
 
-    def original_column(name):
-        name = name.split("__", 1)[1] if "__" in name else name
-        matches = [c for c in REQUIRED_COLUMNS if name == c or name.startswith(c + "_")]
-        return max(matches, key=len) if matches else name
-
     df = pd.DataFrame({"Feature": [original_column(n) for n in names], "Importance": values})
     df = df.groupby("Feature", as_index=False)["Importance"].sum()
     df["Importance"] = df["Importance"] / df["Importance"].sum()
     return df.sort_values("Importance", ascending=False).reset_index(drop=True)
 
 
-tab_single, tab_batch, tab_importance = st.tabs(
-    ["🧍 Single customer", "📁 Batch scoring (CSV)", "📊 What drives churn"]
+tab_single, tab_batch, tab_importance, tab_why = st.tabs(
+    ["🧍 Single customer", "📁 Batch scoring (CSV)", "📊 What drives churn", "🔎 Why this score"]
 )
 
 # ================= TAB 1: single customer =================
@@ -318,5 +376,50 @@ with tab_importance:
             "Importance shows what the model uses, not what causes churn. "
             "Use it as a guide for where to investigate, not as proof of cause."
         )
-    elif imp is None:
+    else:
         st.warning("Feature names and importances didn't line up, so the chart can't be drawn.")
+
+# ================= TAB 4: why this score (SHAP values) =================
+with tab_why:
+    st.subheader("Why this customer got this score")
+    st.write(
+        "Each bar shows how much a customer attribute pushed the churn risk up "
+        "or down compared with an average customer. Uses the customer from the sidebar."
+    )
+
+    try:
+        pre = model.named_steps["preprocessor"]
+        clf = model.named_steps["classifier"]
+
+        X_t = pre.transform(customer_data)
+        if hasattr(X_t, "toarray"):
+            X_t = X_t.toarray()
+        X_t = np.asarray(X_t, dtype=float)
+
+        contrib = clf.get_booster().predict(xgb.DMatrix(X_t), pred_contribs=True)[0]
+        values = contrib[:-1]
+        names = pre.get_feature_names_out()
+
+        df_c = pd.DataFrame({"Feature": [original_column(n) for n in names], "Impact": values})
+        df_c = df_c.groupby("Feature", as_index=False)["Impact"].sum()
+        df_c = df_c.reindex(df_c["Impact"].abs().sort_values(ascending=False).index).head(10)
+        df_c["Direction"] = np.where(df_c["Impact"] > 0, "Raises churn risk", "Lowers churn risk")
+
+        st.bar_chart(
+            df_c, x="Feature", y="Impact", color="Direction", horizontal=True,
+            sort="-Impact",
+        )
+
+        top_up = df_c[df_c["Impact"] > 0].head(2)["Feature"].tolist()
+        top_down = df_c[df_c["Impact"] < 0].head(2)["Feature"].tolist()
+        if top_up:
+            st.error(f"Biggest risk drivers: **{', '.join(top_up)}**")
+        if top_down:
+            st.success(f"Biggest protective factors: **{', '.join(top_down)}**")
+
+        st.caption(
+            "Values are in log-odds units (the model's internal scale), not percentage points. "
+            "Positive means higher churn risk. These explain the model's behaviour, not causes of churn."
+        )
+    except Exception as e:
+        st.error(f"Could not compute explanations: {e}")
