@@ -21,7 +21,7 @@ success_rate = st.sidebar.slider("Expected Campaign Success Rate (%)", 1, 100, 2
 
 @st.cache_resource
 def load_model():
-    return joblib.load("churn_model.pkl")
+    return joblib.load("churn_pipeline.pkl")
     
 model = load_model()
 customer_data = pd.DataFrame({"tenure": [tenure], "MonthlyCharges": [monthly_charges]})
