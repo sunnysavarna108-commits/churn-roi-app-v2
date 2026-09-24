@@ -18,7 +18,7 @@ success_rate = st.sidebar.slider("Expected Campaign Success Rate (%)", 1, 100, 2
 
 # --- Model Integration ---
 # Uncomment the block below and ensure your model file is in the same repository
-'''
+
 @st.cache_resource
 def load_model():
     return joblib.load("churn_model.pkl")
@@ -26,10 +26,10 @@ def load_model():
 model = load_model()
 customer_data = pd.DataFrame({"tenure": [tenure], "MonthlyCharges": [monthly_charges]})
 churn_prob = model.predict_proba(customer_data)[0][1]
-'''
+
 
 # Mock probability for structural demonstration (Delete this once your model is linked)
-churn_prob = np.clip((80 - tenure + (monthly_charges * 0.1)) / 100, 0.05, 0.95)
+#churn_prob = np.clip((80 - tenure + (monthly_charges * 0.1)) / 100, 0.05, 0.95)
 
 st.subheader("Prediction")
 st.metric("Probability of Churn", f"{churn_prob:.1%}")
