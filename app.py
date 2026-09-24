@@ -26,7 +26,7 @@ st.caption("Predict churn probability and see whether a retention campaign pays 
 # ---------------- Sidebar ----------------
 st.sidebar.title("Inputs")
 
-with st.sidebar.expander("💰 Campaign economics (used by both tabs)", expanded=True):
+with st.sidebar.expander("💰 Campaign economics (used by all tabs)", expanded=True):
     customer_ltv = st.number_input("Avg customer lifetime value ($)", min_value=0, value=1200)
     campaign_cost = st.number_input("Cost of retention campaign ($)", min_value=0, value=50)
     success_rate = st.slider("Expected campaign success rate (%)", 1, 100, 25) / 100.0
@@ -82,14 +82,37 @@ def clean_batch(df):
     for col in df.columns:
         if not pd.api.types.is_numeric_dtype(df[col]):
             df[col] = df[col].astype(str).str.strip()
-    # SeniorCitizen may be Yes/No text or 0/1
     df["SeniorCitizen"] = df["SeniorCitizen"].replace({"Yes": 1, "No": 0})
     for col in ["SeniorCitizen", "tenure", "MonthlyCharges", "TotalCharges"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")  # blanks become NaN, pipeline imputes
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
-tab_single, tab_batch = st.tabs(["🧍 Single customer", "📁 Batch scoring (CSV)"])
+@st.cache_data
+def get_feature_importance():
+    """Global importance from the XGBoost step, grouped back to original columns."""
+    pre = model.named_steps["preprocessor"]
+    clf = model.named_steps["classifier"]
+    names = pre.get_feature_names_out()
+    values = clf.feature_importances_
+
+    if len(names) != len(values):
+        return None
+
+    def original_column(name):
+        name = name.split("__", 1)[1] if "__" in name else name
+        matches = [c for c in REQUIRED_COLUMNS if name == c or name.startswith(c + "_")]
+        return max(matches, key=len) if matches else name
+
+    df = pd.DataFrame({"Feature": [original_column(n) for n in names], "Importance": values})
+    df = df.groupby("Feature", as_index=False)["Importance"].sum()
+    df["Importance"] = df["Importance"] / df["Importance"].sum()
+    return df.sort_values("Importance", ascending=False).reset_index(drop=True)
+
+
+tab_single, tab_batch, tab_importance = st.tabs(
+    ["🧍 Single customer", "📁 Batch scoring (CSV)", "📊 What drives churn"]
+)
 
 # ================= TAB 1: single customer =================
 with tab_single:
@@ -169,9 +192,7 @@ with tab_single:
 # ================= TAB 2: batch scoring =================
 with tab_batch:
     st.subheader("Score many customers at once")
-    st.write(
-        "Upload a CSV with these columns (extra columns like `customerID` or `Churn` are ignored):"
-    )
+    st.write("Upload a CSV with these columns (extra columns like `customerID` or `Churn` are ignored):")
     st.code(", ".join(REQUIRED_COLUMNS), language=None)
 
     template = pd.DataFrame([
@@ -249,8 +270,7 @@ with tab_batch:
             hide_index=True,
             column_config={
                 "churn_probability": st.column_config.ProgressColumn(
-                    "churn_probability", min_value=0.0, max_value=1.0, format="%.1f%%"
-                    if False else "percent"
+                    "churn_probability", min_value=0.0, max_value=1.0, format="percent"
                 ),
                 "expected_value_saved": st.column_config.NumberColumn(format="$%.2f"),
                 "net_gain": st.column_config.NumberColumn(format="$%.2f"),
@@ -263,3 +283,40 @@ with tab_batch:
             file_name="scored_customers.csv",
             mime="text/csv",
         )
+
+# ================= TAB 3: feature importance =================
+with tab_importance:
+    st.subheader("What drives churn in this model")
+    st.write(
+        "Relative importance of each customer attribute in the XGBoost model. "
+        "Higher means the model relies on that attribute more when splitting customers into churn / stay."
+    )
+
+    try:
+        imp = get_feature_importance()
+    except Exception as e:
+        imp = None
+        st.error(f"Could not read feature importance from the model: {e}")
+
+    if imp is not None:
+        top_n = st.slider("Number of features to show", 5, len(imp), min(10, len(imp)))
+        top = imp.head(top_n)
+
+        st.bar_chart(top, x="Feature", y="Importance", horizontal=True, sort="-Importance")
+
+        top3 = ", ".join(top["Feature"].head(3))
+        st.info(f"Top drivers: **{top3}**. Retention efforts are likely to matter most for customers with risky values here.")
+
+        with st.expander("See full table"):
+            st.dataframe(
+                imp,
+                hide_index=True,
+                column_config={"Importance": st.column_config.NumberColumn(format="percent")},
+            )
+
+        st.caption(
+            "Importance shows what the model uses, not what causes churn. "
+            "Use it as a guide for where to investigate, not as proof of cause."
+        )
+    elif imp is None:
+        st.warning("Feature names and importances didn't line up, so the chart can't be drawn.")
