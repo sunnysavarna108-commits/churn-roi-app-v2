@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 import xgboost as xgb
 import joblib
 
@@ -9,52 +10,36 @@ st.set_page_config(page_title="Customer Churn ROI", page_icon="📉", layout="wi
 st.markdown(
     """
     <style>
-    /* Page spacing */
     .block-container {
         padding-top: 2rem;
         padding-bottom: 3rem;
         max-width: 1200px;
     }
+    h1 { font-weight: 800; letter-spacing: -0.5px; }
 
-    /* Title */
-    h1 {
-        font-weight: 800;
-        letter-spacing: -0.5px;
-    }
-
-    /* Metric cards */
     [data-testid="stMetric"] {
-        background: #1A1F2B;
-        border: 1px solid #2A3142;
-        border-radius: 12px;
-        padding: 14px 16px;
+        background: transparent;
+        border: none;
+        padding: 4px 0;
     }
-    [data-testid="stMetricLabel"] { opacity: 0.75; }
-    [data-testid="stMetricValue"] { font-size: 1.8rem; font-weight: 700; }
-
-    /* Bordered containers (prediction / ROI cards) */
-    [data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 14px;
+    [data-testid="stMetricLabel"] {
+        opacity: 0.75;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: unset;
     }
-
-    /* Tabs */
-    button[data-baseweb="tab"] {
-        font-size: 1rem;
-        padding: 10px 18px;
-    }
-
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        border-right: 1px solid #2A3142;
+    [data-testid="stMetricValue"] {
+        font-size: 1.5rem;
+        font-weight: 700;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: unset;
     }
 
-    /* Buttons */
-    .stButton > button, .stDownloadButton > button {
-        border-radius: 10px;
-        font-weight: 600;
-    }
-
-    /* Hide the footer (keep the header so the sidebar toggle still works) */
+    [data-testid="stVerticalBlockBorderWrapper"] { border-radius: 14px; }
+    button[data-baseweb="tab"] { font-size: 1rem; padding: 10px 18px; }
+    [data-testid="stSidebar"] { border-right: 1px solid #2A3142; }
+    .stButton > button, .stDownloadButton > button { border-radius: 10px; font-weight: 600; }
     footer { visibility: hidden; }
     </style>
     """,
@@ -153,15 +138,12 @@ def original_column(name):
 
 @st.cache_data
 def get_feature_importance():
-    """Global importance from the XGBoost step, grouped back to original columns."""
     pre = model.named_steps["preprocessor"]
     clf = model.named_steps["classifier"]
     names = pre.get_feature_names_out()
     values = clf.feature_importances_
-
     if len(names) != len(values):
         return None
-
     df = pd.DataFrame({"Feature": [original_column(n) for n in names], "Importance": values})
     df = df.groupby("Feature", as_index=False)["Importance"].sum()
     df["Importance"] = df["Importance"] / df["Importance"].sum()
@@ -193,7 +175,7 @@ with tab_single:
         "PaperlessBilling": paperless,
         "PaymentMethod": payment_method,
         "MonthlyCharges": monthly_charges,
-        "TotalCharges": tenure * monthly_charges,  # estimate
+        "TotalCharges": tenure * monthly_charges,
     }])
 
     churn_prob = float(model.predict_proba(customer_data)[0][1])
@@ -209,7 +191,7 @@ with tab_single:
     with left:
         with st.container(border=True):
             st.subheader("Churn prediction")
-            st.metric("Probability of churn", f"{churn_prob:.1%}")
+            st.metric("Churn probability", f"{churn_prob:.1%}")
             st.progress(min(max(churn_prob, 0.0), 1.0))
             st.markdown(f"### {risk_level(churn_prob)}")
             st.caption(f"High-risk threshold: {threshold:.0%}")
@@ -217,11 +199,15 @@ with tab_single:
     with right:
         with st.container(border=True):
             st.subheader("Campaign ROI")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Campaign cost", f"${campaign_cost:,.0f}")
-            c2.metric("Expected value saved", f"${expected_saved:,.2f}")
-            c3.metric("Net gain", f"${net_gain:,.2f}", delta=f"{net_gain:,.2f}")
-            c4.metric("ROI", f"{roi_pct:.0f}%")
+
+            # 2x2 grid with short labels so nothing truncates
+            r1c1, r1c2 = st.columns(2)
+            r1c1.metric("Cost", f"${campaign_cost:,.0f}")
+            r1c2.metric("Value saved", f"${expected_saved:,.0f}")
+
+            r2c1, r2c2 = st.columns(2)
+            r2c1.metric("Net gain", f"${net_gain:,.0f}")
+            r2c2.metric("ROI", f"{roi_pct:.0f}%")
 
             if net_gain > 0 and churn_prob >= threshold:
                 st.success("✅ Recommended: run the retention campaign for this customer.")
@@ -236,12 +222,44 @@ with tab_single:
                 else:
                     st.caption("Break-even success rate is above 100%: this campaign can't pay off for this customer.")
 
-    st.subheader("Cost vs. expected value")
-    chart_df = pd.DataFrame(
-        {"Amount ($)": [campaign_cost, expected_saved]},
-        index=["Campaign cost", "Expected value saved"],
+    # ---- Sensitivity chart: net gain across the full range of success rates ----
+    st.subheader("Net gain vs. campaign success rate")
+    st.caption("Shows how net gain changes if the real success rate turns out higher or lower than your estimate.")
+
+    rates = np.linspace(0.01, 1.0, 100)
+    sens_df = pd.DataFrame({
+        "Success rate": rates,
+        "Net gain": churn_prob * rates * customer_ltv - campaign_cost,
+    })
+
+    line = alt.Chart(sens_df).mark_line(color="#4F8BF9", strokeWidth=3).encode(
+        x=alt.X("Success rate", axis=alt.Axis(format="%"), title="Campaign success rate"),
+        y=alt.Y("Net gain", title="Net gain ($)"),
+        tooltip=[alt.Tooltip("Success rate", format=".0%"), alt.Tooltip("Net gain", format="$.2f")],
     )
-    st.bar_chart(chart_df, horizontal=True)
+    zero_line = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="gray", strokeDash=[4, 4]).encode(y="y")
+
+    layers = [line, zero_line]
+
+    if breakeven is not None and 0 < breakeven <= 1:
+        be_point = alt.Chart(pd.DataFrame({"x": [breakeven], "y": [0]})).mark_point(
+            color="#FF4B4B", size=100
+        ).encode(x="x", y="y")
+        be_rule = alt.Chart(pd.DataFrame({"x": [breakeven]})).mark_rule(
+            color="#FF4B4B", strokeDash=[4, 4]
+        ).encode(x="x")
+        layers += [be_rule, be_point]
+
+    current_point = alt.Chart(pd.DataFrame({"x": [success_rate], "y": [net_gain]})).mark_point(
+        color="#00C48C", size=140, shape="diamond"
+    ).encode(x="x", y="y")
+    layers.append(current_point)
+
+    st.altair_chart(alt.layer(*layers).properties(height=320), use_container_width=True)
+    st.caption(
+        "🔴 Red = break-even point · 🟢 Green diamond = your current setting. "
+        "Above the dashed gray line, the campaign is profitable."
+    )
 
     with st.expander("🔍 Model input (for verification)"):
         st.dataframe(customer_data, hide_index=True)
@@ -303,16 +321,16 @@ with tab_batch:
 
         st.markdown("### Results")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Customers scored", f"{len(result):,}")
+        m1.metric("Scored", f"{len(result):,}")
         m2.metric("High risk", f"{(result['churn_probability'] >= threshold).sum():,}")
-        m3.metric("Average churn probability", f"{result['churn_probability'].mean():.1%}")
-        m4.metric("Customers to target", f"{len(targeted):,}")
+        m3.metric("Avg churn %", f"{result['churn_probability'].mean():.0%}")
+        m4.metric("To target", f"{len(targeted):,}")
 
         n1, n2, n3, n4 = st.columns(4)
-        n1.metric("Total campaign cost", f"${total_cost:,.0f}")
-        n2.metric("Total expected value saved", f"${total_saved:,.0f}")
-        n3.metric("Total net gain", f"${total_net:,.0f}")
-        n4.metric("Overall ROI", f"{total_roi:.0f}%")
+        n1.metric("Cost", f"${total_cost:,.0f}")
+        n2.metric("Value saved", f"${total_saved:,.0f}")
+        n3.metric("Net gain", f"${total_net:,.0f}")
+        n4.metric("ROI", f"{total_roi:.0f}%")
         st.caption(
             "Only customers at or above the high-risk threshold whose expected value saved exceeds the "
             "campaign cost are targeted."
@@ -405,10 +423,7 @@ with tab_why:
         df_c = df_c.reindex(df_c["Impact"].abs().sort_values(ascending=False).index).head(10)
         df_c["Direction"] = np.where(df_c["Impact"] > 0, "Raises churn risk", "Lowers churn risk")
 
-        st.bar_chart(
-            df_c, x="Feature", y="Impact", color="Direction", horizontal=True,
-            sort="-Impact",
-        )
+        st.bar_chart(df_c, x="Feature", y="Impact", color="Direction", horizontal=True, sort="-Impact")
 
         top_up = df_c[df_c["Impact"] > 0].head(2)["Feature"].tolist()
         top_down = df_c[df_c["Impact"] < 0].head(2)["Feature"].tolist()
