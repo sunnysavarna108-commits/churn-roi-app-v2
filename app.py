@@ -5,6 +5,16 @@ import altair as alt
 import xgboost as xgb
 import joblib
 
+from logic import (
+    risk_level,
+    expected_value_saved,
+    net_gain,
+    roi_percentage,
+    breakeven_success_rate,
+    portfolio_profit_at_threshold,
+    clean_batch,
+)
+
 st.set_page_config(page_title="Customer Churn ROI", page_icon="📉", layout="wide")
 
 st.markdown(
@@ -122,26 +132,7 @@ with st.sidebar.expander("🧾 Account (single customer tab)"):
     )
 
 
-# ---------------- Helpers ----------------
-def risk_level(p):
-    if p >= threshold:
-        return "🔴 High risk"
-    if p >= threshold * 0.6:
-        return "🟠 Medium risk"
-    return "🟢 Low risk"
-
-
-def clean_batch(df):
-    df = df.copy()
-    for col in df.columns:
-        if not pd.api.types.is_numeric_dtype(df[col]):
-            df[col] = df[col].astype(str).str.strip()
-    df["SeniorCitizen"] = df["SeniorCitizen"].replace({"Yes": 1, "No": 0})
-    for col in ["SeniorCitizen", "tenure", "MonthlyCharges", "TotalCharges"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
-
-
+# ---------------- Helpers (model-dependent, stay here) ----------------
 def original_column(name):
     name = name.split("__", 1)[1] if "__" in name else name
     matches = [c for c in REQUIRED_COLUMNS if name == c or name.startswith(c + "_")]
@@ -160,15 +151,6 @@ def get_feature_importance():
     df = df.groupby("Feature", as_index=False)["Importance"].sum()
     df["Importance"] = df["Importance"] / df["Importance"].sum()
     return df.sort_values("Importance", ascending=False).reset_index(drop=True)
-
-
-def portfolio_profit_at_threshold(df, t, cost, ltv_col="expected_value_saved"):
-    """Total net profit if every customer at/above threshold t is targeted."""
-    mask = df["churn_probability"] >= t
-    n = int(mask.sum())
-    total_cost = n * cost
-    total_saved = df.loc[mask, ltv_col].sum()
-    return total_saved - total_cost, n
 
 
 tab_single, tab_batch, tab_importance, tab_why = st.tabs(
@@ -201,11 +183,10 @@ with tab_single:
 
     churn_prob = float(model.predict_proba(customer_data)[0][1])
 
-    expected_saved = churn_prob * success_rate * customer_ltv
-    net_gain = expected_saved - campaign_cost
-    roi_pct = (net_gain / campaign_cost) * 100 if campaign_cost > 0 else 0
-    denom = churn_prob * customer_ltv
-    breakeven = (campaign_cost / denom) if denom > 0 else None
+    saved = expected_value_saved(churn_prob, success_rate, customer_ltv)
+    gain = net_gain(churn_prob, success_rate, customer_ltv, campaign_cost)
+    roi_pct = roi_percentage(churn_prob, success_rate, customer_ltv, campaign_cost)
+    breakeven = breakeven_success_rate(churn_prob, customer_ltv, campaign_cost)
 
     left, right = st.columns([1, 2], gap="large")
 
@@ -214,7 +195,7 @@ with tab_single:
             st.subheader("Churn prediction")
             st.metric("Churn probability", f"{churn_prob:.1%}")
             st.progress(min(max(churn_prob, 0.0), 1.0))
-            st.markdown(f"### {risk_level(churn_prob)}")
+            st.markdown(f"### {risk_level(churn_prob, threshold)}")
             st.caption(f"High-risk threshold: {threshold:.0%}")
             if churn_prob > 0.5:
                 st.caption(
@@ -228,15 +209,15 @@ with tab_single:
 
             r1c1, r1c2 = st.columns(2)
             r1c1.metric("Cost", f"${campaign_cost:,.0f}")
-            r1c2.metric("Value saved", f"${expected_saved:,.0f}")
+            r1c2.metric("Value saved", f"${saved:,.0f}")
 
             r2c1, r2c2 = st.columns(2)
-            r2c1.metric("Net gain", f"${net_gain:,.0f}")
+            r2c1.metric("Net gain", f"${gain:,.0f}")
             r2c2.metric("ROI", f"{roi_pct:.0f}%")
 
-            if net_gain > 0 and churn_prob >= threshold:
+            if gain > 0 and churn_prob >= threshold:
                 st.success("✅ Recommended: run the retention campaign for this customer.")
-            elif net_gain > 0:
+            elif gain > 0:
                 st.info("ℹ️ Campaign is profitable, but risk is below your threshold. Optional.")
             else:
                 st.warning("⚠️ Not recommended: expected value saved is below the campaign cost.")
@@ -253,7 +234,7 @@ with tab_single:
     rates = np.linspace(0.01, 1.0, 100)
     sens_df = pd.DataFrame({
         "Success rate": rates,
-        "Net gain": churn_prob * rates * customer_ltv - campaign_cost,
+        "Net gain": [net_gain(churn_prob, r, customer_ltv, campaign_cost) for r in rates],
     })
 
     line = alt.Chart(sens_df).mark_line(color="#4F8BF9", strokeWidth=3).encode(
@@ -274,7 +255,7 @@ with tab_single:
         ).encode(x="x")
         layers += [be_rule, be_point]
 
-    current_point = alt.Chart(pd.DataFrame({"x": [success_rate], "y": [net_gain]})).mark_point(
+    current_point = alt.Chart(pd.DataFrame({"x": [success_rate], "y": [gain]})).mark_point(
         color="#00C48C", size=140, shape="diamond"
     ).encode(x="x", y="y")
     layers.append(current_point)
@@ -332,8 +313,8 @@ with tab_batch:
 
         result = raw.copy()
         result["churn_probability"] = probs
-        result["risk_level"] = [risk_level(p) for p in probs]
-        result["expected_value_saved"] = probs * success_rate * customer_ltv
+        result["risk_level"] = [risk_level(p, threshold) for p in probs]
+        result["expected_value_saved"] = [expected_value_saved(p, success_rate, customer_ltv) for p in probs]
         result["net_gain"] = result["expected_value_saved"] - campaign_cost
         result["target_campaign"] = (result["churn_probability"] >= threshold) & (result["net_gain"] > 0)
 
@@ -367,7 +348,8 @@ with tab_batch:
         st.markdown("#### Profit-maximizing threshold")
         st.caption(
             "Total portfolio profit if you targeted every customer at or above a given threshold, "
-            "using the campaign cost and success rate set in the sidebar. Computed on this uploaded batch."
+            "using the campaign cost and success rate set in the sidebar. Computed on this uploaded batch. "
+            "Assumes the same success rate and lifetime value apply to every customer."
         )
 
         thresholds = np.linspace(0.0, 1.0, 101)
