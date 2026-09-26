@@ -162,6 +162,15 @@ def get_feature_importance():
     return df.sort_values("Importance", ascending=False).reset_index(drop=True)
 
 
+def portfolio_profit_at_threshold(df, t, cost, ltv_col="expected_value_saved"):
+    """Total net profit if every customer at/above threshold t is targeted."""
+    mask = df["churn_probability"] >= t
+    n = int(mask.sum())
+    total_cost = n * cost
+    total_saved = df.loc[mask, ltv_col].sum()
+    return total_saved - total_cost, n
+
+
 tab_single, tab_batch, tab_importance, tab_why = st.tabs(
     ["🧍 Single customer", "📁 Batch scoring (CSV)", "📊 What drives churn", "🔎 Why this score"]
 )
@@ -207,6 +216,11 @@ with tab_single:
             st.progress(min(max(churn_prob, 0.0), 1.0))
             st.markdown(f"### {risk_level(churn_prob)}")
             st.caption(f"High-risk threshold: {threshold:.0%}")
+            if churn_prob > 0.5:
+                st.caption(
+                    "⚠️ Model tends to be somewhat overconfident above 50% predicted probability "
+                    "(see calibration notes in the README) — actual risk may run 10-25 points lower."
+                )
 
     with right:
         with st.container(border=True):
@@ -349,6 +363,55 @@ with tab_batch:
         st.markdown("#### Risk distribution")
         st.bar_chart(result["risk_level"].value_counts())
 
+        # ---- Profit-maximizing threshold ----
+        st.markdown("#### Profit-maximizing threshold")
+        st.caption(
+            "Total portfolio profit if you targeted every customer at or above a given threshold, "
+            "using the campaign cost and success rate set in the sidebar. Computed on this uploaded batch."
+        )
+
+        thresholds = np.linspace(0.0, 1.0, 101)
+        profit_rows = [portfolio_profit_at_threshold(result, t, campaign_cost) for t in thresholds]
+        profit_values = [p for p, n in profit_rows]
+        profit_df = pd.DataFrame({"Threshold": thresholds, "Net profit": profit_values})
+
+        best_idx = int(np.argmax(profit_values))
+        best_threshold = float(thresholds[best_idx])
+        best_profit = float(profit_values[best_idx])
+        current_profit, current_n = portfolio_profit_at_threshold(result, threshold, campaign_cost)
+
+        profit_line = alt.Chart(profit_df).mark_line(color="#4F8BF9", strokeWidth=3).encode(
+            x=alt.X("Threshold", axis=alt.Axis(format="%"), title="High-risk threshold"),
+            y=alt.Y("Net profit", title="Total portfolio net profit ($)"),
+            tooltip=[alt.Tooltip("Threshold", format=".0%"), alt.Tooltip("Net profit", format="$.0f")],
+        )
+        best_point = alt.Chart(pd.DataFrame({"x": [best_threshold], "y": [best_profit]})).mark_point(
+            color="#00C48C", size=140, shape="diamond"
+        ).encode(x="x", y="y")
+        current_point = alt.Chart(pd.DataFrame({"x": [threshold], "y": [current_profit]})).mark_point(
+            color="#FF4B4B", size=100
+        ).encode(x="x", y="y")
+
+        st.altair_chart(
+            alt.layer(profit_line, best_point, current_point).properties(height=320),
+            use_container_width=True,
+        )
+        st.caption("🟢 Green diamond = profit-maximizing threshold · 🔴 Red = your current threshold setting.")
+
+        pc1, pc2 = st.columns(2)
+        pc1.metric("Optimal threshold", f"{best_threshold:.0%}", help=f"Maximizes profit at ${best_profit:,.0f}")
+        pc2.metric("Your current threshold", f"{threshold:.0%}", help=f"Yields ${current_profit:,.0f} on this batch")
+
+        if abs(best_threshold - threshold) > 0.01:
+            diff = best_profit - current_profit
+            if diff > 0:
+                st.info(
+                    f"Moving your threshold from **{threshold:.0%}** to **{best_threshold:.0%}** would increase "
+                    f"total campaign profit on this batch by roughly **${diff:,.0f}**."
+                )
+        else:
+            st.success("Your current threshold is already at or near the profit-maximizing point for this batch.")
+
         st.markdown("#### Customers ranked by churn probability")
         shown = result.sort_values("churn_probability", ascending=False)
         st.dataframe(
@@ -433,7 +496,18 @@ with tab_why:
         df_c = df_c.reindex(df_c["Impact"].abs().sort_values(ascending=False).index).head(10)
         df_c["Direction"] = np.where(df_c["Impact"] > 0, "Raises churn risk", "Lowers churn risk")
 
-        st.bar_chart(df_c, x="Feature", y="Impact", color="Direction", horizontal=True, sort="-Impact")
+        shap_chart = alt.Chart(df_c).mark_bar().encode(
+            x=alt.X("Impact", title="Impact on churn risk (log-odds)"),
+            y=alt.Y("Feature", sort="-x"),
+            color=alt.Color(
+                "Direction",
+                scale=alt.Scale(domain=["Raises churn risk", "Lowers churn risk"], range=["#FF4B4B", "#00C48C"]),
+                legend=alt.Legend(title=None),
+            ),
+            tooltip=["Feature", alt.Tooltip("Impact", format=".3f")],
+        ).properties(height=35 * len(df_c) + 20)
+
+        st.altair_chart(shap_chart, use_container_width=True)
 
         top_up = df_c[df_c["Impact"] > 0].head(2)["Feature"].tolist()
         top_down = df_c[df_c["Impact"] < 0].head(2)["Feature"].tolist()
@@ -451,4 +525,59 @@ with tab_why:
 
     st.divider()
 
-    # ----------------
+    # ---------------- What-if comparison ----------------
+    st.subheader("What if we changed one thing?")
+    st.write(
+        "Pick an attribute and see the model's actual predicted churn probability for every option, "
+        "with everything else about this customer held the same. Each bar is a real prediction, not an estimate."
+    )
+
+    field = st.selectbox("Attribute to test", list(WHAT_IF_OPTIONS.keys()))
+    options = WHAT_IF_OPTIONS[field]
+
+    try:
+        rows = []
+        for opt in options:
+            variant = customer_data.copy()
+            variant[field] = opt
+            p = float(model.predict_proba(variant)[0][1])
+            rows.append({"Option": opt, "Churn probability": p})
+
+        whatif_df = pd.DataFrame(rows).sort_values("Churn probability").reset_index(drop=True)
+        whatif_df["Is current"] = whatif_df["Option"] == customer_data[field].iloc[0]
+
+        chart = alt.Chart(whatif_df).mark_bar().encode(
+            x=alt.X("Churn probability", axis=alt.Axis(format="%"), title="Predicted churn probability"),
+            y=alt.Y("Option", sort="-x", title=field),
+            color=alt.Color(
+                "Is current",
+                scale=alt.Scale(domain=[True, False], range=["#00C48C", "#4F8BF9"]),
+                legend=None,
+            ),
+            tooltip=["Option", alt.Tooltip("Churn probability", format=".1%")],
+        ).properties(height=45 * len(options) + 40)
+
+        st.altair_chart(chart, use_container_width=True)
+        st.caption("🟢 Green bar = this customer's current setting.")
+
+        current_prob = whatif_df.loc[whatif_df["Is current"], "Churn probability"].iloc[0]
+        best_row = whatif_df.iloc[0]
+        if best_row["Option"] != customer_data[field].iloc[0]:
+            diff = current_prob - best_row["Churn probability"]
+            diff_saved = diff * customer_ltv
+            st.info(
+                f"Switching **{field}** from **{customer_data[field].iloc[0]}** to **{best_row['Option']}** "
+                f"would move predicted churn probability from **{current_prob:.1%}** to "
+                f"**{best_row['Churn probability']:.1%}** ({diff*100:+.1f} points), "
+                f"worth roughly **${diff_saved:,.0f}** in avoided expected loss at the current lifetime value."
+            )
+        else:
+            st.success(f"This customer already has the lowest-risk option for **{field}**.")
+
+    except Exception as e:
+        st.error(f"Could not compute the what-if comparison: {e}")
+
+    st.caption(
+        "This shows correlation the model has learned, not proof that changing the attribute causes the "
+        "probability to change. Use it to prioritise conversations, not as a guaranteed outcome."
+    )
