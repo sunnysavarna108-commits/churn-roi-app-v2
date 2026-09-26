@@ -53,6 +53,18 @@ REQUIRED_COLUMNS = [
     "Contract", "PaperlessBilling", "PaymentMethod", "MonthlyCharges", "TotalCharges",
 ]
 
+WHAT_IF_OPTIONS = {
+    "Contract": ["Month-to-month", "One year", "Two year"],
+    "InternetService": ["Fiber optic", "DSL", "No"],
+    "PaymentMethod": [
+        "Electronic check", "Mailed check",
+        "Bank transfer (automatic)", "Credit card (automatic)",
+    ],
+    "PaperlessBilling": ["Yes", "No"],
+    "OnlineSecurity": ["No", "Yes"],
+    "TechSupport": ["No", "Yes"],
+}
+
 
 @st.cache_resource
 def load_model():
@@ -200,7 +212,6 @@ with tab_single:
         with st.container(border=True):
             st.subheader("Campaign ROI")
 
-            # 2x2 grid with short labels so nothing truncates
             r1c1, r1c2 = st.columns(2)
             r1c1.metric("Cost", f"${campaign_cost:,.0f}")
             r1c2.metric("Value saved", f"${expected_saved:,.0f}")
@@ -222,7 +233,6 @@ with tab_single:
                 else:
                     st.caption("Break-even success rate is above 100%: this campaign can't pay off for this customer.")
 
-    # ---- Sensitivity chart: net gain across the full range of success rates ----
     st.subheader("Net gain vs. campaign success rate")
     st.caption("Shows how net gain changes if the real success rate turns out higher or lower than your estimate.")
 
@@ -397,7 +407,7 @@ with tab_importance:
     else:
         st.warning("Feature names and importances didn't line up, so the chart can't be drawn.")
 
-# ================= TAB 4: why this score (SHAP values) =================
+# ================= TAB 4: why this score (SHAP) + what-if =================
 with tab_why:
     st.subheader("Why this customer got this score")
     st.write(
@@ -438,3 +448,7 @@ with tab_why:
         )
     except Exception as e:
         st.error(f"Could not compute explanations: {e}")
+
+    st.divider()
+
+    # ----------------
