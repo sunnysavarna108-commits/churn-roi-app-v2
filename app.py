@@ -78,10 +78,16 @@ WHAT_IF_OPTIONS = {
 
 @st.cache_resource
 def load_model():
+    return joblib.load("churn_pipeline_calibrated.pkl")
+
+
+@st.cache_resource
+def load_explain_model():
     return joblib.load("churn_pipeline.pkl")
 
 
 model = load_model()
+explain_model = load_explain_model()
 
 # ---------------- Header ----------------
 st.title("📉 Customer Churn & Retention ROI")
