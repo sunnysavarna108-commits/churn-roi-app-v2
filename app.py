@@ -79,13 +79,13 @@ WHAT_IF_OPTIONS = {
 @st.cache_resource
 def load_model():
     # Calibrated model: used for all probabilities, ROI and what-if predictions
-    return joblib.load("churn_pipeline_calibrated.pkl")
+    return joblib.load("churn_pipeline_calibrated_weighted.pkl") 
 
 
 @st.cache_resource
 def load_explain_model():
     # Original pipeline: used only for feature importance and per-customer explanations
-    return joblib.load("churn_pipeline.pkl")
+    return joblib.load("churn_pipeline_weighted.pkl")  
 
 
 model = load_model()
