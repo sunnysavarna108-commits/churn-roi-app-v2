@@ -78,14 +78,14 @@ WHAT_IF_OPTIONS = {
 
 @st.cache_resource
 def load_model():
-    # Calibrated model: used for all probabilities, ROI and what-if predictions
-    return joblib.load("churn_pipeline_calibrated_weighted.pkl") 
+    # Calibrated, class-weighted model: used for all probabilities, ROI and what-if predictions
+    return joblib.load("churn_pipeline_calibrated_weighted.pkl")
 
 
 @st.cache_resource
 def load_explain_model():
-    # Original pipeline: used only for feature importance and per-customer explanations
-    return joblib.load("churn_pipeline_weighted.pkl")  
+    # Uncalibrated class-weighted pipeline: used only for feature importance and explanations
+    return joblib.load("churn_pipeline_weighted.pkl")
 
 
 model = load_model()
@@ -102,7 +102,7 @@ with st.sidebar.expander("💰 Campaign economics (used by all tabs)", expanded=
     customer_ltv = st.number_input("Avg customer lifetime value ($)", min_value=0, value=1200)
     campaign_cost = st.number_input("Cost of retention campaign ($)", min_value=0, value=50)
     success_rate = st.slider("Expected campaign success rate (%)", 1, 100, 25) / 100.0
-    threshold = st. slider ("High-risk threshold (%)" , 10 , 90 , 17 ) / 100.0 
+    threshold = st.slider("High-risk threshold (%)", 10, 90, 17) / 100.0
 
 with st.sidebar.expander("👤 Customer profile (single customer tab)", expanded=True):
     tenure = st.slider("Tenure (months)", 1, 72, 12)
@@ -149,7 +149,7 @@ def original_column(name):
 
 @st.cache_data
 def get_feature_importance():
-    # Uses the ORIGINAL pipeline (the calibrated wrapper has no named_steps)
+    # Uses the uncalibrated pipeline (the calibrated wrapper has no named_steps)
     pre = explain_model.named_steps["preprocessor"]
     clf = explain_model.named_steps["classifier"]
     names = pre.get_feature_names_out()
@@ -441,7 +441,14 @@ with tab_importance:
         top_n = st.slider("Number of features to show", 5, len(imp), min(10, len(imp)))
         top = imp.head(top_n)
 
-        st.bar_chart(top, x="Feature", y="Importance", horizontal=True, sort="-Importance")
+        st.altair_chart(
+            alt.Chart(top).mark_bar(color="#87CEFA").encode(
+                x=alt.X("Importance", title="Importance"),
+                y=alt.Y("Feature", sort="-x"),
+                tooltip=["Feature", alt.Tooltip("Importance", format=".3f")],
+            ).properties(height=30 * len(top) + 20),
+            use_container_width=True,
+        )
 
         top3 = ", ".join(top["Feature"].head(3))
         st.info(f"Top drivers: **{top3}**. Retention efforts are likely to matter most for customers with risky values here.")
@@ -469,7 +476,7 @@ with tab_why:
     )
 
     try:
-        # Uses the ORIGINAL pipeline (the calibrated wrapper has no named_steps)
+        # Uses the uncalibrated pipeline (the calibrated wrapper has no named_steps)
         pre = explain_model.named_steps["preprocessor"]
         clf = explain_model.named_steps["classifier"]
 
@@ -510,7 +517,7 @@ with tab_why:
         st.caption(
             "Values are in log-odds units (the model's internal scale), not percentage points. "
             "Positive means higher churn risk. These explain the model's behaviour, not causes of churn. "
-            "Bars explain the original XGBoost model; the probability shown elsewhere comes from its "
+            "Bars explain the uncalibrated XGBoost model; the probability shown elsewhere comes from its "
             "calibrated version, so driver rankings match but exact values can differ slightly."
         )
     except Exception as e:
