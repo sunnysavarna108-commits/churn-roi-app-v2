@@ -102,7 +102,7 @@ with st.sidebar.expander("💰 Campaign economics (used by all tabs)", expanded=
     customer_ltv = st.number_input("Avg customer lifetime value ($)", min_value=0, value=1200)
     campaign_cost = st.number_input("Cost of retention campaign ($)", min_value=0, value=50)
     success_rate = st.slider("Expected campaign success rate (%)", 1, 100, 25) / 100.0
-    threshold = st.slider("High-risk threshold (%)", 10, 90, 50) / 100.0
+    threshold = st. slider ("High-risk threshold (%)" , 10 , 90 , 17 ) / 100.0 
 
 with st.sidebar.expander("👤 Customer profile (single customer tab)", expanded=True):
     tenure = st.slider("Tenure (months)", 1, 72, 12)
