@@ -78,11 +78,13 @@ WHAT_IF_OPTIONS = {
 
 @st.cache_resource
 def load_model():
+    # Calibrated model: used for all probabilities, ROI and what-if predictions
     return joblib.load("churn_pipeline_calibrated.pkl")
 
 
 @st.cache_resource
 def load_explain_model():
+    # Original pipeline: used only for feature importance and per-customer explanations
     return joblib.load("churn_pipeline.pkl")
 
 
@@ -147,8 +149,9 @@ def original_column(name):
 
 @st.cache_data
 def get_feature_importance():
-    pre = model.named_steps["preprocessor"]
-    clf = model.named_steps["classifier"]
+    # Uses the ORIGINAL pipeline (the calibrated wrapper has no named_steps)
+    pre = explain_model.named_steps["preprocessor"]
+    clf = explain_model.named_steps["classifier"]
     names = pre.get_feature_names_out()
     values = clf.feature_importances_
     if len(names) != len(values):
@@ -203,11 +206,10 @@ with tab_single:
             st.progress(min(max(churn_prob, 0.0), 1.0))
             st.markdown(f"### {risk_level(churn_prob, threshold)}")
             st.caption(f"High-risk threshold: {threshold:.0%}")
-            if churn_prob > 0.5:
-                st.caption(
-                    "⚠️ Model tends to be somewhat overconfident above 50% predicted probability "
-                    "(see calibration notes in the README) — actual risk may run 10-25 points lower."
-                )
+            st.caption(
+                "ℹ️ Probabilities are calibrated on held-out data (isotonic calibration). "
+                "Individual customers may still differ from the estimate."
+            )
 
     with right:
         with st.container(border=True):
@@ -467,8 +469,9 @@ with tab_why:
     )
 
     try:
-        pre = model.named_steps["preprocessor"]
-        clf = model.named_steps["classifier"]
+        # Uses the ORIGINAL pipeline (the calibrated wrapper has no named_steps)
+        pre = explain_model.named_steps["preprocessor"]
+        clf = explain_model.named_steps["classifier"]
 
         X_t = pre.transform(customer_data)
         if hasattr(X_t, "toarray"):
@@ -506,7 +509,9 @@ with tab_why:
 
         st.caption(
             "Values are in log-odds units (the model's internal scale), not percentage points. "
-            "Positive means higher churn risk. These explain the model's behaviour, not causes of churn."
+            "Positive means higher churn risk. These explain the model's behaviour, not causes of churn. "
+            "Bars explain the original XGBoost model; the probability shown elsewhere comes from its "
+            "calibrated version, so driver rankings match but exact values can differ slightly."
         )
     except Exception as e:
         st.error(f"Could not compute explanations: {e}")
